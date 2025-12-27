@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>D71 Pro - WebAR Particle Storm</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #video-container { position: fixed; width: 100%; height: 100%; transform: scaleX(-1); }
+        video { object-fit: cover; width: 100%; height: 100%; opacity: 0.3; }
+        canvas#webgl { position: absolute; top: 0; left: 0; pointer-events: none; }
+        #ui { position: fixed; top: 20px; left: 20px; color: #00f2ff; text-shadow: 0 0 10px #00f2ff; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div id="status">初始化 MediaPipe...</div>
+    <div id="gesture-info">当前手势: 等待检测</div>
+</div>
+
+<div id="video-container">
+    <video id="input_video"></video>
+</div>
+<canvas id="webgl"></canvas>
+
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/@mediapipe/hands/hands.js"></script>
+<script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/**
+ * 核心参数配置
+ */
+const PARTICLE_COUNT = 16000;
+const TEXT_CONTENT = "我是 D71";
+let currentGesture = "NONE";
+let targetPoints = new Float32Array(PARTICLE_COUNT * 3);
+let particleVelocities = new Float32Array(PARTICLE_COUNT * 3);
+let particlePositions = new Float32Array(PARTICLE_COUNT * 3);
+
+// 初始化 Three.js
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 5;
+
+const renderer = new THREE.WebGLRenderer({ 
+    canvas: document.querySelector('#webgl'), 
+    alpha: true, 
+    antialias: true 
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+// 粒子材质：青色发光
+const geometry = new THREE.BufferGeometry();
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const colors = new Float32Array(PARTICLE_COUNT * 3);
+
+for(let i=0; i<PARTICLE_COUNT; i++) {
+    positions[i*3] = (Math.random() - 0.5) * 10;
+    positions[i*3+1] = (Math.random() - 0.5) * 10;
+    positions[i*3+2] = (Math.random() - 0.5) * 10;
+    colors[i*3] = 0.0; colors[i*3+1] = 0.95; colors[i*3+2] = 1.0; 
+}
+
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const material = new THREE.PointsMaterial({
+    size: 0.025,
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    opacity: 0.8
+});
+
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+/**
+ * 形状生成函数库
+ */
+const Generators = {
+    // 1. 张手 -> 散开/球体
+    sphere: (arr) => {
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+            const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+            arr[i*3] = 2 * Math.cos(theta) * Math.sin(phi);
+            arr[i*3+1] = 2 * Math.sin(theta) * Math.sin(phi);
+            arr[i*3+2] = 2 * Math.cos(phi);
+        }
+    },
+    // 2. 剪刀手 -> 文字 "我是 D71"
+    text: (arr) => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 200; canvas.height = 60;
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 30px Arial';
+        ctx.fillText(TEXT_CONTENT, 10, 40);
+        const imgData = ctx.getImageData(0,0,200,60).data;
+        const pts = [];
+        for(let i=0; i<imgData.length; i+=4) {
+            if(imgData[i] > 128) {
+                pts.push({x: (i/4%200)/20 - 5, y: -(Math.floor(i/4/200))/20 + 1.5});
+            }
+        }
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const p = pts[i % pts.length];
+            arr[i*3] = p.x + (Math.random()-0.5)*0.1;
+            arr[i*3+1] = p.y + (Math.random()-0.5)*0.1;
+            arr[i*3+2] = (Math.random()-0.5)*0.2;
+        }
+    },
+    // 3. 握拳 -> 圆环
+    torus: (arr) => {
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const u = Math.random() * Math.PI * 2;
+            const v = Math.random() * Math.PI * 2;
+            arr[i*3] = (2 + 0.5 * Math.cos(v)) * Math.cos(u);
+            arr[i*3+1] = (2 + 0.5 * Math.cos(v)) * Math.sin(u);
+            arr[i*3+2] = 0.5 * Math.sin(v);
+        }
+    },
+    // 4. 食指 -> 星形
+    star: (arr) => {
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const t = Math.random() * Math.PI * 2;
+            const r = (Math.abs(Math.cos(t*2.5)) + 0.5) * 2;
+            arr[i*3] = r * Math.cos(t);
+            arr[i*3+1] = r * Math.sin(t);
+            arr[i*3+2] = (Math.random()-0.5)*0.5;
+        }
+    },
+    // 5. 大拇指 -> 爱心
+    heart: (arr) => {
+        for(let i=0; i<PARTICLE_COUNT; i++) {
+            const t = Math.random() * Math.PI * 2;
+            arr[i*3] = 0.15 * (16 * Math.pow(Math.sin(t), 3));
+            arr[i*3+1] = 0.15 * (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t));
+            arr[i*3+2] = (Math.random()-0.5)*0.5;
+        }
+    }
+};
+
+// 初始爆炸
+function explode() {
+    for(let i=0; i<PARTICLE_COUNT*3; i++) {
+        particleVelocities[i] += (Math.random()-0.5) * 0.5;
+    }
+}
+
+/**
+ * MediaPipe 逻辑
+ */
+const videoElement = document.getElementById('input_video');
+let lastHandPos = {x: 0, y: 0};
+let handSpeed = 0;
+
+const hands = new Hands({locateFile: (file) => `https://unpkg.com/@mediapipe/hands/${file}`});
+hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+
+hands.onResults((results) => {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        
+        // 1. 深度反馈：根据手掌范围缩放
+        const xList = landmarks.map(p => p.x);
+        const yList = landmarks.map(p => p.y);
+        const area = (Math.max(...xList) - Math.min(...xList)) * (Math.max(...yList) - Math.min(...yList));
+        points.scale.setScalar(0.5 + area * 5);
+
+        // 2. 挥手风暴检测
+        const currentPos = {x: landmarks[9].x, y: landmarks[9].y};
+        handSpeed = Math.hypot(currentPos.x - lastHandPos.x, currentPos.y - lastHandPos.y);
+        lastHandPos = currentPos;
+
+        // 3. 手势识别状态机
+        let newGesture = "NONE";
+        const dist = (p1, p2) => Math.hypot(landmarks[p1].x-landmarks[p2].x, landmarks[p1].y-landmarks[p2].y);
+        
+        const isIndexUp = landmarks[8].y < landmarks[6].y;
+        const isMiddleUp = landmarks[12].y < landmarks[10].y;
+        const isThumbUp = landmarks[4].y < landmarks[2].y && landmarks[4].x < landmarks[3].x; // 针对镜像简单处理
+
+        if(isIndexUp && isMiddleUp && !isThumbUp && dist(8,12) > 0.1) newGesture = "TEXT";
+        else if(isIndexUp && !isMiddleUp) newGesture = "STAR";
+        else if(isThumbUp && !isIndexUp) newGesture = "HEART";
+        else if(dist(4,8) < 0.05 && dist(8,12) < 0.05) newGesture = "TORUS";
+        else if(dist(4,17) > 0.2) newGesture = "SPHERE";
+
+        if(newGesture !== currentGesture && newGesture !== "NONE") {
+            currentGesture = newGesture;
+            document.getElementById('gesture-info').innerText = `当前手势: ${currentGesture}`;
+            if(Generators[currentGesture.toLowerCase()]) {
+                Generators[currentGesture.toLowerCase()](targetPoints);
+                explode(); // 切换时爆炸特效
+            }
+        }
+    }
+});
+
+const cameraMP = new Camera(videoElement, {
+    onFrame: async () => { await hands.send({image: videoElement}); },
+    width: 1280, height: 720
+});
+cameraMP.start();
+
+/**
+ * 物理引擎循环
+ */
+function animate() {
+    requestAnimationFrame(animate);
+    
+    const posAttr = geometry.attributes.position;
+    const friction = 0.92; // 摩擦力
+    const ease = 0.05;    // 缓动系数
+
+    for(let i=0; i<PARTICLE_COUNT; i++) {
+        const i3 = i * 3;
+        
+        // 1. 基础物理：加速度朝向目标点
+        let ax = (targetPoints[i3] - posAttr.array[i3]) * ease;
+        let ay = (targetPoints[i3+1] - posAttr.array[i3+1]) * ease;
+        let az = (targetPoints[i3+2] - posAttr.array[i3+2]) * ease;
+
+        // 2. 挥手风暴：注入随机扰动加速度
+        if(handSpeed > 0.03) {
+            ax += (Math.random() - 0.5) * handSpeed * 5;
+            ay += (Math.random() - 0.5) * handSpeed * 5;
+            az += (Math.random() - 0.5) * handSpeed * 5;
+        }
+
+        // 3. 速度累计与衰减
+        particleVelocities[i3] = (particleVelocities[i3] + ax) * friction;
+        particleVelocities[i3+1] = (particleVelocities[i3+1] + ay) * friction;
+        particleVelocities[i3+2] = (particleVelocities[i3+2] + az) * friction;
+
+        // 4. 更新位置
+        posAttr.array[i3] += particleVelocities[i3];
+        posAttr.array[i3+1] += particleVelocities[i3+1];
+        posAttr.array[i3+2] += particleVelocities[i3+2];
+    }
+
+    posAttr.needsUpdate = true;
+    renderer.render(scene, camera);
+}
+
+// 窗口自适应
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// 启动
+document.getElementById('status').innerText = "系统就绪 - 请展示手势";
+Generators.sphere(targetPoints); // 初始为球形
+animate();
+
+</script>
+</body>
+</html>
